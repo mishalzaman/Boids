@@ -1,0 +1,174 @@
+#pragma kernel ComputeBoids
+#pragma kernel ResetTextures
+
+struct Boid {
+    float2 Velocity;
+    float2 Position;
+    float Speed;
+};
+
+RWStructuredBuffer<Boid> Boids;
+float TextureSize;
+float Speed;
+float FlockGravity;
+float DeltaTime;
+float Time;
+float2 Center;
+float AvoidRadius;
+
+float AlignFactor;
+float FollowFactor;
+float AvoidFactor;
+float SeparationFactor;
+
+RWTexture2D<float4> BoidVelocityTexture1;
+RWTexture2D<float4> BoidVelocityTexture2;
+RWTexture2D<float4> BoidOutputTex;
+
+
+[numthreads(8, 8, 1)]
+void ResetTextures(uint3 id : SV_DispatchThreadID)
+{
+    BoidVelocityTexture2[id.xy] = float4(0, 0, 0, 0);
+    BoidOutputTex[id.xy] = float4(0, 0, 0, 0);
+}
+
+float2 SeparationVelocity(Boid boid, RWTexture2D<float4> Tex)
+{
+    float2 SeparationVel = float2(0, 0);
+    float4 Temp = 0;
+    int Radius = 1;
+
+    [unroll(Radius * 2 + 1)]
+    for (int i = -Radius; i <= Radius; i++)
+        [unroll(Radius * 2 + 1)]
+        for (int j = -Radius; j <= Radius; j++)
+        {
+            if (i == 0 && j == 0)
+                continue;
+
+            Temp = Tex[(boid.Position + float2(i, j)) % TextureSize];
+            if (Temp.a==1)
+                //SeparationVel -= float2(i, j);
+                SeparationVel -= (dot(boid.Velocity, Temp.xy)<0.25) ? float2(i, j) : 0;
+        } 
+    
+
+    return SeparationVel;
+}
+
+float2 AvoidVelocity(int iD,Boid boid, RWTexture2D<float4> Tex)
+{
+    float2 AvoidVel = float2(0, 0);
+    if (length( boid.Position- Center)> TextureSize / 2-AvoidRadius*100 *TextureSize / 2048)
+    {
+        AvoidVel = 4*(Center - boid.Position)/TextureSize;
+    }
+    else
+        for (int i = 1; i <= 3; i++)
+            if (Tex[boid.Position + boid.Velocity * i].a == 1)
+            {
+                AvoidVel = float2(sin(iD),cos(3.14-iD));
+                break;
+            }
+    return AvoidVel;
+}
+
+float2 FollowVelocity(Boid boid, RWTexture2D<float4> Tex)
+{
+    float2 FollowVel = 0;
+    float4 Temp = 0;
+    float2 TempVel = 0;
+
+    int Radius = 2;
+    float2 ClosestID=0;
+    float Dist = 555555;
+
+    [unroll(Radius * 2 + 1)]
+    for (int i = -Radius; i <= Radius; i++)
+    {
+        [unroll(Radius * 2 + 1)]
+        for (int j = -Radius; j <= Radius; j++)
+        {
+            if (i == 0 && j == 0)
+                continue;
+
+            Temp = Tex[(boid.Position + float2(i, j)) % TextureSize];
+            if (Temp.a == 1)
+                if (length(float2(i, j) - float2(0, 0)) < Dist)
+                {
+                    Dist = length(float2(i, j));
+                    ClosestID = float2(i, j);
+                    TempVel = Temp.xy;
+                }
+        }
+    }
+    
+    FollowVel = ClosestID;
+    return FollowVel;
+}
+
+float2 AlignVelocity(float2 ID, RWTexture2D<float4> Tex)
+{
+    int Radius = 2;
+    float2 CurrentVelocity = Tex[ID];
+    float2 AlignVel = 0;
+    float2 Vel = 0;
+    int Count = 1;
+    [unroll(Radius * 2 + 1)]
+    for (int i = -Radius; i <= Radius; i++)
+    {
+        [unroll(Radius * 2 + 1)]
+        for (int j = -Radius; j <= Radius; j++)
+        {
+            if (i == 0 && j == 0)
+                continue;
+            float4 Temp= Tex[(ID + float2(i, j)) % TextureSize];
+            Vel = Temp.xy;
+            Vel *= 2;
+            Vel -= 1;
+            if (Temp.a == 1)
+            { 
+                Count++;
+                float Dot = dot(normalize(Vel), normalize(CurrentVelocity));
+                AlignVel += (Dot >= 0) ? Vel : 0;
+            }
+          
+        }
+    }
+    return AlignVel / (Count);
+}
+
+
+[numthreads(128, 1, 1)]
+void ComputeBoids(uint3 id : SV_DispatchThreadID)
+{
+    Boid boid = Boids[id.x];
+    float2 ID = boid.Position;
+
+    float2 Avoid = AvoidVelocity(id.x,boid, BoidVelocityTexture1);
+    float2 Follow = FollowVelocity(boid, BoidVelocityTexture1);
+    float2 Align = AlignVelocity(ID, BoidVelocityTexture1);
+    //float2 Separation = 0;
+    float2 Separation = SeparationVelocity(boid, BoidVelocityTexture1);
+
+    boid.Velocity += (Follow * FollowFactor  + Align * AlignFactor  + Avoid * AvoidFactor - boid.Velocity) * FlockGravity * DeltaTime  +0.01 * float2(sin(Time / 2 + ID.x * 5 / TextureSize), cos(Time / 2 + ID.x * 2 / TextureSize));
+   // boid.Velocity += (Separation* SeparationFactor *100 +Follow * FollowFactor  + Align * AlignFactor  + Avoid * AvoidFactor - boid.Velocity) * FlockGravity * DeltaTime  +0.01 * float2(sin(Time / 2 + ID.x * 5 / TextureSize), cos(Time / 2 + ID.x * 2 / TextureSize));
+    boid.Velocity += Separation * dot(Separation, boid.Velocity);
+    if (length(boid.Velocity) > 0)
+        boid.Velocity = normalize(boid.Velocity);
+    boid.Position = boid.Position + boid.Velocity * DeltaTime * Speed*boid.Speed;
+
+    //zidovi
+    boid.Position.y = (boid.Position.y > TextureSize) ? 0 : (boid.Position.y < 0) ? TextureSize : boid.Position.y;
+    boid.Position.x = (boid.Position.x > TextureSize) ? 0 : (boid.Position.x < 0) ? TextureSize : boid.Position.x;
+  
+    Boids[id.x] = boid;
+    ID = boid.Position;
+
+   BoidVelocityTexture2[ID] = float4((boid.Velocity.xy + 1) / 2, 1 ,1);
+
+   BoidOutputTex[ID] = float4(0.5,0.5,0.5,1);
+}
+
+ 
